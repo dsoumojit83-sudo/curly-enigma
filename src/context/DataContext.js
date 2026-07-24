@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 // Fallbacks
 import localSyllabus from '@/data/syllabusLocal';
@@ -54,13 +54,13 @@ export function DataProvider({ children }) {
 
         setSyllabus(tree);
 
-        // Fetch questions
-        const { data: qData, error: qError } = await supabase.from('questions').select('*').limit(2000);
-        if (qError) throw qError;
-        setQuestions(qData || []);
+        // We no longer fetch all questions upfront to avoid client-side payload bottleneck.
+        // Pages that need questions should fetch them dynamically based on user selection.
+        setQuestions([]);
       } catch (err) {
         console.error('Failed to fetch from Supabase, using local fallback:', err);
         setSyllabus(localSyllabus);
+        // Fallback to local questions if offline
         setQuestions(localQuestions);
       } finally {
         setLoading(false);
@@ -71,7 +71,7 @@ export function DataProvider({ children }) {
   }, []);
 
   // Helper functions
-  const findTopicById = (topicId) => {
+  const findTopicById = useCallback((topicId) => {
     if (!topicId || !syllabus) return null;
     for (const subject of Object.values(syllabus)) {
       const searchNode = (nodes) => {
@@ -88,12 +88,12 @@ export function DataProvider({ children }) {
       if (found) return found;
     }
     return null;
-  };
+  }, [syllabus]);
 
-  const getQuestionsByTopics = (topicIds) => {
+  const getQuestionsByTopics = useCallback((topicIds) => {
     if (!topicIds || topicIds.length === 0) return questions;
-    return questions.filter(q => topicIds.includes(q.topic_id)); // Map to new DB column topic_id
-  };
+    return questions.filter(q => topicIds.includes(q.topic_id));
+  }, [questions]);
 
   const value = useMemo(() => ({
     syllabus,
@@ -101,7 +101,7 @@ export function DataProvider({ children }) {
     loading,
     findTopicById,
     getQuestionsByTopics,
-  }), [syllabus, questions, loading]);
+  }), [syllabus, questions, loading, findTopicById, getQuestionsByTopics]);
 
   return (
     <DataContext.Provider value={value}>

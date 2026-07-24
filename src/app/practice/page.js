@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { useData } from '@/context/DataContext';
 import { saveAnswer, updateTodayStats, recordPracticeToday, recordPracticeSession, toggleBookmark, isBookmarked, addRecentTopic } from '@/lib/storage';
+import { supabase } from '@/lib/supabase';
 
 /* ── Option Letters ── */
 const LETTERS = ['A', 'B', 'C', 'D'];
@@ -24,49 +25,65 @@ function ExplanationPanel({ question, selectedIndex }) {
         {/* Why the correct answer is correct */}
         <div className="explanation-panel__section">
           <div className="explanation-panel__section-title">
-            ✅ Why Option {LETTERS[question.correct]} is Correct
+            ✅ Why the Correct Option is Correct
           </div>
           <p>{exp.correct}</p>
         </div>
 
         {/* Why each wrong option is wrong */}
         {!isCorrect && (
-          <div className="explanation-panel__section">
-            <div className="explanation-panel__section-title">
-              ❌ Why Option {LETTERS[selectedIndex]} is Wrong
+          Array.isArray(selectedIndex) ? (
+            selectedIndex.map(idx => (
+              <div key={idx} className="explanation-panel__section">
+                <div className="explanation-panel__section-title">
+                  ❌ Why Option {LETTERS[idx]} is Wrong
+                </div>
+                <p>{exp.whyWrong[idx]}</p>
+              </div>
+            ))
+          ) : (
+            <div className="explanation-panel__section">
+              <div className="explanation-panel__section-title">
+                ❌ Why Option {LETTERS[selectedIndex]} is Wrong
+              </div>
+              <p>{exp.whyWrong[selectedIndex]}</p>
             </div>
-            <p>{exp.whyWrong[selectedIndex]}</p>
-          </div>
+          )
         )}
 
         {/* Explain all other options */}
         <div className="explanation-panel__section">
           <div className="explanation-panel__section-title">📋 All Options Explained</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {question.options.map((opt, idx) => (
-              <div key={idx} style={{
-                padding: 'var(--space-sm) var(--space-md)',
-                borderRadius: 'var(--radius-sm)',
-                background: idx === question.correct
-                  ? 'rgba(0, 206, 201, 0.06)'
-                  : 'var(--bg-tertiary)',
-                borderLeft: `3px solid ${idx === question.correct ? 'var(--success)' : 'var(--danger)'}`,
-              }}>
-                <strong style={{ color: idx === question.correct ? 'var(--success)' : 'var(--text-primary)' }}>
-                  {LETTERS[idx]}. {opt}
-                </strong>
-                {exp.whyWrong[idx] && (
-                  <p style={{ margin: '4px 0 0', fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
-                    {exp.whyWrong[idx]}
-                  </p>
-                )}
-                {idx === question.correct && (
-                  <p style={{ margin: '4px 0 0', fontSize: '0.88rem', color: 'var(--success)' }}>
-                    ✅ {exp.correct}
-                  </p>
-                )}
-              </div>
-            ))}
+            {question.options.map((opt, idx) => {
+              const isCorrectOption = Array.isArray(question.correct_answer) 
+                ? question.correct_answer.includes(idx) 
+                : idx === Number(question.correct_answer);
+              return (
+                <div key={idx} style={{
+                  padding: 'var(--space-sm) var(--space-md)',
+                  borderRadius: 'var(--radius-sm)',
+                  background: isCorrectOption
+                    ? 'rgba(0, 206, 201, 0.06)'
+                    : 'var(--bg-tertiary)',
+                  borderLeft: `3px solid ${isCorrectOption ? 'var(--success)' : 'var(--danger)'}`,
+                }}>
+                  <strong style={{ color: isCorrectOption ? 'var(--success)' : 'var(--text-primary)' }}>
+                    {LETTERS[idx]}. {opt}
+                  </strong>
+                  {exp.whyWrong && exp.whyWrong[idx] && (
+                    <p style={{ margin: '4px 0 0', fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
+                      {exp.whyWrong[idx]}
+                    </p>
+                  )}
+                  {isCorrectOption && (
+                    <p style={{ margin: '4px 0 0', fontSize: '0.88rem', color: 'var(--success)' }}>
+                      ✅ {exp.correct}
+                    </p>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -142,13 +159,9 @@ function PracticeInner() {
   const topicsParam = searchParams.get('topics') || '';
   const selectedTopicIds = useMemo(() => new Set(topicsParam.split(',').filter(Boolean)), [topicsParam]);
 
-  const { questions: allQuestions, loading } = useData();
-
-  // Filter questions based on selected topics (Confidence Learning Mode)
-  const filteredQuestions = useMemo(() => {
-    if (selectedTopicIds.size === 0) return allQuestions;
-    return allQuestions.filter((q) => selectedTopicIds.has(q.topic_id));
-  }, [selectedTopicIds, allQuestions]);
+  const { questions: allQuestions, loading: dataContextLoading } = useData();
+  const [filteredQuestions, setFilteredQuestions] = useState([]);
+  const [questionsLoading, setQuestionsLoading] = useState(true);
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedOption, setSelectedOption] = useState(null);
@@ -157,12 +170,52 @@ function PracticeInner() {
   const [showResults, setShowResults] = useState(false);
   const [timer, setTimer] = useState(0);
 
+  const [numericalAnswer, setNumericalAnswer] = useState('');
+  const [multiSelectAnswers, setMultiSelectAnswers] = useState(new Set());
+
+  // Fetch Questions
+  useEffect(() => {
+    async function loadQuestions() {
+      setQuestionsLoading(true);
+      if (selectedTopicIds.size === 0) {
+        setFilteredQuestions([]);
+        setQuestionsLoading(false);
+        return;
+      }
+      
+      const topicIdsArray = Array.from(selectedTopicIds);
+      if (!supabase) {
+        // Fallback to local DataContext questions if offline
+        setFilteredQuestions(allQuestions.filter(q => topicIdsArray.includes(q.topic_id)));
+        setQuestionsLoading(false);
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('questions')
+          .select('*')
+          .in('topic_id', topicIdsArray);
+        if (error) throw error;
+        setFilteredQuestions(data || []);
+      } catch (err) {
+        console.error(err);
+        setFilteredQuestions(allQuestions.filter(q => topicIdsArray.includes(q.topic_id)));
+      } finally {
+        setQuestionsLoading(false);
+      }
+    }
+    if (!dataContextLoading) {
+      loadQuestions();
+    }
+  }, [selectedTopicIds, allQuestions, dataContextLoading]);
+
   // Timer
   useEffect(() => {
-    if (showResults) return;
+    if (showResults || questionsLoading) return;
     const interval = setInterval(() => setTimer((t) => t + 1), 1000);
     return () => clearInterval(interval);
-  }, [showResults]);
+  }, [showResults, questionsLoading]);
 
   const currentQuestion = filteredQuestions[currentIndex];
   const isLastQuestion = currentIndex >= filteredQuestions.length - 1;
@@ -218,9 +271,11 @@ function PracticeInner() {
     setCurrentIndex((prev) => prev + 1);
     setSelectedOption(null);
     setAnswered(false);
+    setNumericalAnswer('');
+    setMultiSelectAnswers(new Set());
   };
 
-  if (loading) {
+  if (dataContextLoading || questionsLoading) {
     return (
       <div className="container" style={{ textAlign: 'center', paddingTop: 'var(--space-3xl)' }}>
         <p style={{ color: 'var(--text-secondary)' }}>Loading questions...</p>
@@ -392,37 +447,31 @@ function PracticeInner() {
           )}
 
           {currentQuestion.type === 'numerical' ? (
-            <div style={{ display: 'flex', gap: 'var(--space-md)', alignItems: 'center' }}>
+            <form onSubmit={(e) => { e.preventDefault(); if (numericalAnswer) handleSubmitAnswer(numericalAnswer); }} style={{ display: 'flex', gap: 'var(--space-md)', alignItems: 'center' }}>
               <input 
                 type="number" 
                 id="numerical-answer"
+                value={numericalAnswer}
+                onChange={(e) => setNumericalAnswer(e.target.value)}
                 placeholder="Enter your answer..."
                 disabled={answered}
                 className="input"
                 style={{ flex: 1, padding: '0.8rem', fontSize: '1rem', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && e.target.value) {
-                    handleSubmitAnswer(e.target.value);
-                  }
-                }}
               />
               {!answered && (
                 <button 
+                  type="submit"
                   className="btn btn--primary" 
-                  onClick={() => {
-                    const val = document.getElementById('numerical-answer').value;
-                    if (val) handleSubmitAnswer(val);
-                  }}
                 >
                   Submit
                 </button>
               )}
-            </div>
+            </form>
           ) : currentQuestion.type === 'multi-correct' ? (
-            <div>
+            <form onSubmit={(e) => { e.preventDefault(); if (multiSelectAnswers.size > 0) handleSubmitAnswer(Array.from(multiSelectAnswers)); }}>
               {currentQuestion.options.map((option, idx) => {
                 let stateClass = '';
-                const isSelected = Array.isArray(selectedOption) && selectedOption.includes(idx);
+                const isSelected = Array.isArray(selectedOption) ? selectedOption.includes(idx) : multiSelectAnswers.has(idx);
                 const isCorrectOption = Array.isArray(currentQuestion.correct_answer) && currentQuestion.correct_answer.includes(idx);
                 
                 if (answered) {
@@ -437,7 +486,13 @@ function PracticeInner() {
                       type="checkbox" 
                       disabled={answered}
                       id={`multi-opt-${idx}`}
-                      defaultChecked={isSelected}
+                      checked={isSelected}
+                      onChange={(e) => {
+                        const newSet = new Set(multiSelectAnswers);
+                        if (e.target.checked) newSet.add(idx);
+                        else newSet.delete(idx);
+                        setMultiSelectAnswers(newSet);
+                      }}
                       style={{ width: '1.2rem', height: '1.2rem' }}
                     />
                     <span>{LETTERS[idx]}. {option}</span>
@@ -446,20 +501,14 @@ function PracticeInner() {
               })}
               {!answered && (
                 <button 
+                  type="submit"
                   className="btn btn--primary" 
                   style={{ marginTop: 'var(--space-lg)', width: '100%' }}
-                  onClick={() => {
-                    const selected = [];
-                    currentQuestion.options.forEach((_, idx) => {
-                      if (document.getElementById(`multi-opt-${idx}`).checked) selected.push(idx);
-                    });
-                    if (selected.length > 0) handleSubmitAnswer(selected);
-                  }}
                 >
                   Submit Answer
                 </button>
               )}
-            </div>
+            </form>
           ) : (
             // Standard MCQ / Assertion / Statement / Match options
             currentQuestion.options.map((option, idx) => {

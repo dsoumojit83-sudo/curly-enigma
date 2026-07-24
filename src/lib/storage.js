@@ -7,8 +7,11 @@ import { supabase } from './supabase';
 
 const PREFIX = 'neetmastery_';
 
+let inMemoryFallback = {};
+
 function get(key, fallback = null) {
   if (typeof window === 'undefined') return fallback;
+  if (inMemoryFallback[key] !== undefined) return inMemoryFallback[key];
   try {
     const raw = localStorage.getItem(PREFIX + key);
     return raw ? JSON.parse(raw) : fallback;
@@ -17,7 +20,15 @@ function get(key, fallback = null) {
 
 function set(key, value) {
   if (typeof window === 'undefined') return;
-  try { localStorage.setItem(PREFIX + key, JSON.stringify(value)); } catch {}
+  try { 
+    localStorage.setItem(PREFIX + key, JSON.stringify(value)); 
+    inMemoryFallback[key] = value;
+  } catch (e) {
+    if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
+      console.warn('localStorage quota exceeded. Falling back to in-memory storage.');
+      inMemoryFallback[key] = value;
+    }
+  }
 }
 
 function remove(key) {
@@ -67,9 +78,9 @@ export function saveAnswer(topicId, isCorrect) {
           last_practiced: prev.lastPracticed
         }).then(({ error }) => {
           if (error) console.error('Failed to sync progress:', error);
-        });
+        }).catch(err => console.error('Network error during progress sync:', err));
       }
-    });
+    }).catch(err => console.error('Failed to get user for sync:', err));
   }
 
   return prev;
